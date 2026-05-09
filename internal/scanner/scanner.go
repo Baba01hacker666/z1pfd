@@ -15,9 +15,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"z1pfd/internal/output"
 )
+
+// Printer interface to avoid import cycle with output package
+type Printer interface {
+	Info(format string, args ...interface{})
+	Progress(done, total int64, pct float64, found int64)
+}
 
 // Config holds scanner configuration
 type Config struct {
@@ -86,7 +90,7 @@ var validContentTypes = []string{
 }
 
 // Run executes the scanner and returns all found results
-func Run(cfg *Config, paths []string, printer *output.Printer) []Result {
+func Run(cfg *Config, paths []string, printer Printer) []Result {
 	// load resume state
 	resumeState := loadResumeState(cfg.ResumeFile)
 	scanned := resumeState.Scanned
@@ -121,6 +125,22 @@ func Run(cfg *Config, paths []string, printer *output.Printer) []Result {
 
 	client := buildClient(cfg)
 
+	// background progress updater to prevent lock contention on stdout
+	go func() {
+		progTicker := time.NewTicker(250 * time.Millisecond)
+		defer progTicker.Stop()
+		for range progTicker.C {
+			d := done.Load()
+			if d >= int64(total) {
+				return
+			}
+			pct := float64(d) / float64(total) * 100
+			printer.Progress(d, int64(total), pct, found.Load())
+		}
+	}()
+
+	var scannedMu sync.Mutex
+
 	// spawn workers
 	for i := 0; i < cfg.Concurrency; i++ {
 		wg.Add(1)
@@ -132,9 +152,9 @@ func Run(cfg *Config, paths []string, printer *output.Printer) []Result {
 				}
 				fullURL := cfg.Target + path
 				result, ok := probe(client, cfg, fullURL)
-				done.Add(1)
-				d := done.Load()
-				if d%500 == 0 || d == int64(total) {
+				
+				d := done.Add(1)
+				if d == int64(total) {
 					pct := float64(d) / float64(total) * 100
 					printer.Progress(d, int64(total), pct, found.Load())
 				}
@@ -144,9 +164,11 @@ func Run(cfg *Config, paths []string, printer *output.Printer) []Result {
 					resultCh <- result
 				}
 
-				// save resume state
+				// save resume state (thread-safe)
 				if cfg.ResumeFile != "" {
+					scannedMu.Lock()
 					scanned[fullURL] = true
+					scannedMu.Unlock()
 				}
 			}
 		}()
@@ -215,7 +237,6 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
-	req.Header.Set("Connection", "close")
 	req.Header.Set("Cache-Control", "no-cache")
 
 	// WAF/CDN bypass headers
@@ -230,7 +251,13 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 		}
 		return Result{}, false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			// Drain up to 32KB to allow connection reuse for small responses (like 404 pages)
+			io.CopyN(io.Discard, resp.Body, 32*1024)
+			resp.Body.Close()
+		}
+	}()
 
 	elapsed := time.Since(start)
 
@@ -317,11 +344,14 @@ func randomIP() string {
 
 func buildClient(cfg *Config) *http.Client {
 	transport := &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-		MaxIdleConns:        cfg.Concurrency * 2,
-		MaxIdleConnsPerHost: cfg.Concurrency,
-		IdleConnTimeout:     30 * time.Second,
-		DisableKeepAlives:   false,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		MaxConnsPerHost:       cfg.Concurrency,
+		MaxIdleConns:          cfg.Concurrency * 2,
+		MaxIdleConnsPerHost:   cfg.Concurrency,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableKeepAlives:     false,
 	}
 
 	if cfg.Proxy != "" {
