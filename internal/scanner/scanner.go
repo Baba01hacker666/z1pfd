@@ -37,6 +37,7 @@ type Config struct {
 	RateLimit   int
 	Verbose     bool
 	ResumeFile  string
+	NoProgress  bool
 }
 
 // Result represents a found archive
@@ -126,18 +127,20 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 	client := buildClient(cfg)
 
 	// background progress updater to prevent lock contention on stdout
-	go func() {
-		progTicker := time.NewTicker(250 * time.Millisecond)
-		defer progTicker.Stop()
-		for range progTicker.C {
-			d := done.Load()
-			if d >= int64(total) {
-				return
+	if !cfg.NoProgress {
+		go func() {
+			progTicker := time.NewTicker(250 * time.Millisecond)
+			defer progTicker.Stop()
+			for range progTicker.C {
+				d := done.Load()
+				if d >= int64(total) {
+					return
+				}
+				pct := float64(d) / float64(total) * 100
+				printer.Progress(d, int64(total), pct, found.Load())
 			}
-			pct := float64(d) / float64(total) * 100
-			printer.Progress(d, int64(total), pct, found.Load())
-		}
-	}()
+		}()
+	}
 
 	var scannedMu sync.Mutex
 
@@ -154,7 +157,7 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 				result, ok := probe(client, cfg, fullURL)
 				
 				d := done.Add(1)
-				if d == int64(total) {
+				if !cfg.NoProgress && d == int64(total) {
 					pct := float64(d) / float64(total) * 100
 					printer.Progress(d, int64(total), pct, found.Load())
 				}
