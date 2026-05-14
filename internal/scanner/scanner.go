@@ -315,22 +315,12 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 		}
 	}
 
-	isHTML := strings.Contains(ct, "text/html")
-
-	if result.MagicMatch {
+	if ctMatch || result.MagicMatch || (extMatch && result.Size > 1000) {
 		return result, true
 	}
 
-	if ctMatch && !isHTML {
-		return result, true
-	}
-
-	if extMatch && result.Size > 1000 && !isHTML {
-		return result, true
-	}
-
-	// if content-length is > 0 and extension matches, likely a hit
-	if extMatch && (result.Size == -1 || result.Size > 0) && result.Status == 200 && !isHTML {
+	// if content-length is large and extension matches, likely a hit
+	if extMatch && (result.Size == -1 || result.Size > 0) && result.Status == 200 {
 		return result, true
 	}
 

@@ -36,8 +36,7 @@ func main() {
 		timeout           = flag.Int("timeout", 10, "Request timeout in seconds")
 		outputFile        = flag.String("o", "", "Output file (json/txt based on extension)")
 		wordlist          = flag.String("w", "", "Custom wordlist file (one word per line)")
-		extensions        = flag.String("ext", ".zip", "Comma-separated extensions")
-		configs           = flag.Bool("configs", false, "Include common config files (.env, .yml, .config, etc)")
+		extensions        = flag.String("ext", ".zip,.tar.gz,.rar,.7z", "Comma-separated extensions")
 		proxy             = flag.String("proxy", "", "HTTP proxy (e.g. http://127.0.0.1:8080)")
 		depth             = flag.Int("depth", 1, "Path depth (1=root paths, 2=sub paths)")
 		noRedirect        = flag.Bool("no-redirect", false, "Do not follow redirects")
@@ -59,9 +58,6 @@ func main() {
 	}
 
 	exts := strings.Split(*extensions, ",")
-	if *configs {
-		exts = append(exts, ".env", ".config", ".yml", ".yaml", ".ini", ".bak", ".pem", ".key", ".txt")
-	}
 
 	printer := output.New(!*noColor)
 
