@@ -293,8 +293,8 @@ func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick b
 	pathSet := make(map[string]bool)
 	if quick {
 		pathSet["/"] = true
-		pathSet["/backup/"] = true
-		pathSet["/db/"] = true
+		
+		
 	} else {
 		for _, p := range commonPaths {
 			pathSet[p] = true
