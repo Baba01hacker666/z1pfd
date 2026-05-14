@@ -26,7 +26,7 @@ const banner = `
 `
 
 func main() {
-	fmt.Println(banner)
+	fmt.Print(banner)
 
 	var (
 		target            = flag.String("u", "", "Target URL")
@@ -134,7 +134,7 @@ func main() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			
+
 			res := scanTarget(targetURL, config, printer, baseWords, multi)
 			mu.Lock()
 			allResults = append(allResults, res...)
