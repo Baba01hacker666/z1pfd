@@ -106,7 +106,7 @@ func New(intel *extractor.Intel, exts []string) *Generator {
 }
 
 // Generate produces all candidate filenames (without paths)
-func (g *Generator) Generate(customWords []string) []string {
+func (g *Generator) Generate(customWords []string, quick bool) []string {
 	seen := make(map[string]bool)
 	var words []string
 
@@ -127,6 +127,11 @@ func (g *Generator) Generate(customWords []string) []string {
 	years := generateYears()
 	dates := generateDates()
 
+	if quick {
+		years = []string{fmt.Sprintf("%d", time.Now().Year())}
+		dates = []string{}
+	}
+
 	for _, base := range bases {
 		if base == "" {
 			continue
@@ -144,6 +149,12 @@ func (g *Generator) Generate(customWords []string) []string {
 		// with suffixes
 		for _, sfx := range suffixes {
 			addWord(base + sfx)
+		}
+
+		if quick {
+			addWord(strings.ToUpper(base))
+			addWord(strings.Title(strings.ToLower(base)))
+			continue
 		}
 
 		// with versions
@@ -194,6 +205,9 @@ func (g *Generator) Generate(customWords []string) []string {
 	// add all common names standalone + date combos
 	for _, cn := range commonNames {
 		addWord(cn)
+		if quick {
+			continue
+		}
 		for _, yr := range years {
 			for _, sep := range separators {
 				addWord(cn + sep + yr)
@@ -274,11 +288,17 @@ func collectBases(intel *extractor.Intel) []string {
 }
 
 // ExpandPaths combines filenames with paths to build full URL sets
-func ExpandPaths(filenames []string, extractedPaths []string, depth int) []string {
+func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick bool) []string {
 	// merge extracted paths with common paths
 	pathSet := make(map[string]bool)
-	for _, p := range commonPaths {
-		pathSet[p] = true
+	if quick {
+		pathSet["/"] = true
+		pathSet["/backup/"] = true
+		pathSet["/db/"] = true
+	} else {
+		for _, p := range commonPaths {
+			pathSet[p] = true
+		}
 	}
 	for _, p := range extractedPaths {
 		if len(p) < 60 { // skip very long paths
@@ -292,7 +312,7 @@ func ExpandPaths(filenames []string, extractedPaths []string, depth int) []strin
 	}
 
 	// depth > 1: generate sub-path combinations
-	if depth > 1 {
+	if depth > 1 && !quick {
 		var extended []string
 		for _, p1 := range paths {
 			for _, p2 := range commonPaths {

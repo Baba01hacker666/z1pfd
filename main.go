@@ -46,6 +46,7 @@ func main() {
 		rateLimit         = flag.Int("rate", 0, "Requests per second limit (0=unlimited)")
 		verbose           = flag.Bool("v", false, "Verbose output")
 		noColor           = flag.Bool("no-color", false, "Disable colored output")
+		quick             = flag.Bool("q", false, "Quick mode: limit paths and words for fast testing")
 	)
 
 	flag.Parse()
@@ -135,7 +136,7 @@ func main() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			res := scanTarget(targetURL, config, printer, baseWords, multi)
+			res := scanTarget(targetURL, config, printer, baseWords, multi, *quick)
 			mu.Lock()
 			allResults = append(allResults, res...)
 			mu.Unlock()
@@ -166,7 +167,7 @@ func main() {
 	}
 }
 
-func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWords []string, multi bool) []scanner.Result {
+func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWords []string, multi bool, quick bool) []scanner.Result {
 	if multi {
 		printer.Info("[%s] Starting scan...", url)
 	}
@@ -192,7 +193,7 @@ func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWo
 		printer.Section("PHASE 2/3 — Generating & Mutating Wordlist")
 	}
 	gen := generator.New(intel, cfg.Extensions)
-	candidates := gen.Generate(baseWords)
+	candidates := gen.Generate(baseWords, quick)
 	if !multi {
 		printer.Info("Candidates    : %d filenames generated", len(candidates))
 	}
@@ -201,7 +202,7 @@ func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWo
 	if !multi {
 		printer.Section("PHASE 4 — Expanding Paths")
 	}
-	paths := generator.ExpandPaths(candidates, intel.Paths, cfg.Depth)
+	paths := generator.ExpandPaths(candidates, intel.Paths, cfg.Depth, quick)
 	if !multi {
 		printer.Info("Total probes  : %d URLs to test", len(paths))
 	}
