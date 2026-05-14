@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"z1pfd/internal/extractor"
 	"z1pfd/internal/generator"
 	"z1pfd/internal/output"
@@ -25,6 +27,32 @@ const banner = `
   by Baba01hacker666 | DCT
 `
 
+type ToolConfig struct {
+	Concurrency       int    `yaml:"concurrency"`
+	TargetConcurrency int    `yaml:"target_concurrency"`
+	Timeout           int    `yaml:"timeout"`
+	Extensions        string `yaml:"extensions"`
+	Proxy             string `yaml:"proxy"`
+	Depth             int    `yaml:"depth"`
+	NoRedirect        bool   `yaml:"no_redirect"`
+	RandomUA          bool   `yaml:"rand_ua"`
+	MinSize           int64  `yaml:"min_size"`
+	RateLimit         int    `yaml:"rate_limit"`
+	Wordlist          string `yaml:"wordlist"`
+}
+
+func loadConfig(path string) (*ToolConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg ToolConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func main() {
 	fmt.Print(banner)
 
@@ -36,7 +64,7 @@ func main() {
 		timeout           = flag.Int("timeout", 10, "Request timeout in seconds")
 		outputFile        = flag.String("o", "", "Output file (json/txt based on extension)")
 		wordlist          = flag.String("w", "", "Custom wordlist file (one word per line)")
-		extensions        = flag.String("ext", ".zip,.tar.gz,.rar,.7z", "Comma-separated extensions")
+		extensions        = flag.String("ext", ".zip", "Comma-separated extensions")
 		proxy             = flag.String("proxy", "", "HTTP proxy (e.g. http://127.0.0.1:8080)")
 		depth             = flag.Int("depth", 1, "Path depth (1=root paths, 2=sub paths)")
 		noRedirect        = flag.Bool("no-redirect", false, "Do not follow redirects")
@@ -47,9 +75,53 @@ func main() {
 		verbose           = flag.Bool("v", false, "Verbose output")
 		noColor           = flag.Bool("no-color", false, "Disable colored output")
 		quick             = flag.Bool("q", false, "Quick mode: limit paths and words for fast testing")
+		configFile        = flag.String("config", "", "Path to YAML config file")
 	)
 
 	flag.Parse()
+
+	if *configFile != "" {
+		cfg, err := loadConfig(*configFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ERR] Failed to load config file: %v\n", err)
+			os.Exit(1)
+		}
+
+		if cfg.Concurrency > 0 {
+			*concurrency = cfg.Concurrency
+		}
+		if cfg.TargetConcurrency > 0 {
+			*targetConcurrency = cfg.TargetConcurrency
+		}
+		if cfg.Timeout > 0 {
+			*timeout = cfg.Timeout
+		}
+		if cfg.Extensions != "" {
+			*extensions = cfg.Extensions
+		}
+		if cfg.Proxy != "" {
+			*proxy = cfg.Proxy
+		}
+		if cfg.Depth > 0 {
+			*depth = cfg.Depth
+		}
+		if cfg.MinSize > 0 {
+			*minSize = cfg.MinSize
+		}
+		if cfg.RateLimit > 0 {
+			*rateLimit = cfg.RateLimit
+		}
+		if cfg.Wordlist != "" {
+			*wordlist = cfg.Wordlist
+		}
+
+		if cfg.NoRedirect {
+			*noRedirect = true
+		}
+		if cfg.RandomUA {
+			*randomUA = true
+		}
+	}
 
 	if *target == "" && *listFile == "" {
 		fmt.Fprintln(os.Stderr, "[ERR] -u target URL or -l list file is required")
