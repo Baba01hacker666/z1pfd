@@ -31,14 +31,14 @@ var (
 	reWordSplit = regexp.MustCompile(`[\s\-_/\.]+`)
 
 	frameworks = map[string][]string{
-		"Laravel":   {"laravel", "csrf-token", "csrf_token", "laravel_session"},
-		"WordPress": {"wp-content", "wp-includes", "wordpress"},
-		"Django":    {"csrfmiddlewaretoken", "django"},
-		"Rails":     {"rails", "authenticity_token"},
-		"Symfony":   {"symfony", "_csrf_token"},
+		"Laravel":     {"laravel", "csrf-token", "csrf_token", "laravel_session"},
+		"WordPress":   {"wp-content", "wp-includes", "wordpress"},
+		"Django":      {"csrfmiddlewaretoken", "django"},
+		"Rails":       {"rails", "authenticity_token"},
+		"Symfony":     {"symfony", "_csrf_token"},
 		"CodeIgniter": {"codeigniter", "ci_session"},
-		"Drupal":    {"drupal", "drupal.js"},
-		"Joomla":    {"joomla", "/components/com_"},
+		"Drupal":      {"drupal", "drupal.js"},
+		"Joomla":      {"joomla", "/components/com_"},
 	}
 
 	stopWords = map[string]bool{

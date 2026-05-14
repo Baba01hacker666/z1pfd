@@ -365,13 +365,13 @@ func generateDates() []string {
 	for delta := 0; delta <= 365*3; delta += 30 {
 		t := now.AddDate(0, 0, -delta)
 		dates = append(dates,
-			t.Format("20060102"),          // YYYYMMDD
-			t.Format("2006-01-02"),         // YYYY-MM-DD
-			t.Format("02-01-2006"),         // DD-MM-YYYY
-			t.Format("01-2006"),            // MM-YYYY
-			t.Format("2006-01"),            // YYYY-MM
-			t.Format("200601"),             // YYYYMM
-			fmt.Sprintf("%d", t.Year()),    // YYYY
+			t.Format("20060102"),        // YYYYMMDD
+			t.Format("2006-01-02"),      // YYYY-MM-DD
+			t.Format("02-01-2006"),      // DD-MM-YYYY
+			t.Format("01-2006"),         // MM-YYYY
+			t.Format("2006-01"),         // YYYY-MM
+			t.Format("200601"),          // YYYYMM
+			fmt.Sprintf("%d", t.Year()), // YYYY
 		)
 	}
 

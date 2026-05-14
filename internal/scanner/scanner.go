@@ -155,7 +155,7 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 				}
 				fullURL := cfg.Target + path
 				result, ok := probe(client, cfg, fullURL)
-				
+
 				d := done.Add(1)
 				if !cfg.NoProgress && d == int64(total) {
 					pct := float64(d) / float64(total) * 100
