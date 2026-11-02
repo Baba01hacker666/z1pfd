@@ -42,7 +42,7 @@ jobs:
             base="${f%.*}"
             mkdir -p "pkg/$base"
             cp "$f" "pkg/$base/$bin"
-            (cd "pkg/$base" && zip -q -9 "../z1pfd-v${VERSION}-${base#z1pfd-}.zip" "$bin")
+            (cd "pkg/$base" && zip -q -9 "../../z1pfd-v${VERSION}-${base#z1pfd-}.zip" "$bin")
           done
           sha256sum *.zip > checksums.txt
           ls -la
