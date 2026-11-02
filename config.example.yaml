@@ -26,6 +26,15 @@ depth: 1
 no_redirect: false
 rand_ua: true
 
+# Spoof X-Forwarded-For / X-Real-IP headers (classic WAF bypass trick);
+# off by default so requests stay as realistic as possible
+# xff: false
+
+# Cap on candidate URLs probed per target (speed control).
+# The generator can produce 1M+ combinations on keyword-rich targets;
+# the cap keeps scans finite. 0 = unlimited.
+max_probes: 250000
+
 # Only report files larger than this many bytes (0 = no limit)
 min_size: 0
 

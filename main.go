@@ -20,13 +20,17 @@ import (
 	"github.com/Baba01hacker666/z1pfd/internal/scanner"
 )
 
+// version can be injected at build time:
+// go build -ldflags "-s -w -X main.version=1.2.3"
+var version = "1.2.0"
+
 const banner = `
  ______  __  ____  ____  ____
 |_  /  ||  ||  _ \|  __||  _ \
   / / _ | || |_) || |_  | | | |
  /_/|___||_||____/|____||_|_|_|
 
-  Dynamic ZIP Finder v1.1
+  Dynamic ZIP Finder v%s
   by Baba01hacker666 | DCT
 `
 
@@ -39,10 +43,12 @@ type ToolConfig struct {
 	Depth             int    `yaml:"depth"`
 	NoRedirect        *bool  `yaml:"no_redirect"`
 	RandomUA          *bool  `yaml:"rand_ua"`
+	SpoofIP           *bool  `yaml:"xff"`
 	MinSize           int64  `yaml:"min_size"`
 	RateLimit         int    `yaml:"rate_limit"`
 	Wordlist          string `yaml:"wordlist"`
 	Quick             *bool  `yaml:"quick"`
+	MaxProbes         int    `yaml:"max_probes"`
 }
 
 func loadConfig(path string) (*ToolConfig, error) {
@@ -58,7 +64,7 @@ func loadConfig(path string) (*ToolConfig, error) {
 }
 
 func main() {
-	fmt.Print(banner)
+	fmt.Printf(banner, version)
 
 	var (
 		target            = flag.String("u", "", "Target URL")
@@ -72,10 +78,12 @@ func main() {
 		proxy             = flag.String("proxy", "", "HTTP proxy (e.g. http://127.0.0.1:8080)")
 		depth             = flag.Int("depth", 1, "Path depth (1=root paths, 2=sub paths)")
 		noRedirect        = flag.Bool("no-redirect", false, "Do not follow redirects")
-		randomUA          = flag.Bool("rand-ua", true, "Randomize User-Agent")
+		randomUA          = flag.Bool("rand-ua", true, "Randomize User-Agent with realistic browser headers")
+		spoofIP           = flag.Bool("xff", false, "Spoof X-Forwarded-For/X-Real-IP headers (WAF bypass)")
 		minSize           = flag.Int64("min-size", 0, "Minimum file size in bytes to report")
 		resume            = flag.String("resume", "", "Resume file path (saves/loads progress)")
 		rateLimit         = flag.Int("rate", 0, "Requests per second limit (0=unlimited)")
+		maxProbes         = flag.Int("max-probes", 250000, "Max URLs to probe per target (0=unlimited)")
 		verbose           = flag.Bool("v", false, "Verbose output")
 		noColor           = flag.Bool("no-color", false, "Disable colored output")
 		quick             = flag.Bool("q", false, "Quick mode: limit paths and words for fast testing")
@@ -160,6 +168,14 @@ func main() {
 			if cfg.RandomUA != nil {
 				*randomUA = *cfg.RandomUA
 			}
+		})
+		apply("xff", func() {
+			if cfg.SpoofIP != nil {
+				*spoofIP = *cfg.SpoofIP
+			}
+		})
+		apply("max-probes", func() {
+			*maxProbes = cfg.MaxProbes // 0 in YAML = unlimited
 		})
 	}
 
@@ -268,6 +284,7 @@ func main() {
 			Depth:       *depth,
 			NoRedirect:  *noRedirect,
 			RandomUA:    *randomUA,
+			SpoofIP:     *spoofIP,
 			MinSize:     *minSize,
 			RateLimit:   *rateLimit,
 			Verbose:     *verbose,
@@ -282,7 +299,7 @@ func main() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			res := scanTarget(targetURL, config, printer, baseWords, multi, *quick)
+			res := scanTarget(targetURL, config, printer, baseWords, multi, *quick, *maxProbes)
 			mu.Lock()
 			allResults = append(allResults, res...)
 			mu.Unlock()
@@ -313,7 +330,7 @@ func main() {
 	}
 }
 
-func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWords []string, multi bool, quick bool) []scanner.Result {
+func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWords []string, multi bool, quick bool, maxProbes int) []scanner.Result {
 	if multi {
 		printer.Info("[%s] Starting scan...", url)
 	}
@@ -348,9 +365,12 @@ func scanTarget(url string, cfg *scanner.Config, printer *output.Printer, baseWo
 	if !multi {
 		printer.Section("PHASE 4 — Expanding Paths")
 	}
-	paths := generator.ExpandPaths(candidates, intel.Paths, cfg.Depth, quick)
+	paths, totalURLs := generator.ExpandPaths(candidates, intel.Paths, cfg.Depth, quick, maxProbes)
 	if !multi {
 		printer.Info("Total probes  : %d URLs to test", len(paths))
+	}
+	if totalURLs > 0 && len(paths) < totalURLs {
+		printer.Warn("Probe cap hit : ~%d URLs generated, probing first %d (raise -max-probes or use -q for coverage control)", totalURLs, len(paths))
 	}
 
 	// Phase 5: Scanning

@@ -53,6 +53,12 @@ var (
 
 	separators = []string{"-", "_", ".", ""}
 
+	// slimmer separator sets for high-volume mutation groups: keeps the most
+	// common naming styles while cutting the total by ~35-50%
+	versionSeparators = []string{"-", "_", ""}
+	yearSeparators    = []string{"-", "_", ""}
+	dateSeparators    = []string{"_", "-"}
+
 	commonPaths = []string{
 		"/",
 		"/backup/",
@@ -159,7 +165,7 @@ func (g *Generator) Generate(customWords []string, quick bool) []string {
 		}
 
 		// with versions
-		for _, sep := range separators {
+		for _, sep := range versionSeparators {
 			for _, ver := range versions {
 				addWord(base + sep + ver)
 				addWord(ver + sep + base)
@@ -175,7 +181,7 @@ func (g *Generator) Generate(customWords []string, quick bool) []string {
 		}
 
 		// with dates
-		for _, sep := range []string{"_", "-", ""} {
+		for _, sep := range dateSeparators {
 			for _, dt := range dates {
 				addWord(base + sep + dt)
 			}
@@ -184,7 +190,7 @@ func (g *Generator) Generate(customWords []string, quick bool) []string {
 		// prefix + base + year
 		for _, pfx := range prefixes {
 			for _, yr := range years {
-				for _, sep := range separators {
+				for _, sep := range yearSeparators {
 					addWord(pfx + base + sep + yr)
 				}
 			}
@@ -210,7 +216,7 @@ func (g *Generator) Generate(customWords []string, quick bool) []string {
 			continue
 		}
 		for _, yr := range years {
-			for _, sep := range separators {
+			for _, sep := range yearSeparators {
 				addWord(cn + sep + yr)
 			}
 		}
@@ -285,11 +291,22 @@ func collectBases(intel *extractor.Intel) []string {
 		add(kw)
 	}
 
+	// cap the explosion: too many keywords × mutations would take forever;
+	// keep extraction order (domain first, most relevant keywords next)
+	if len(bases) > maxBases {
+		bases = bases[:maxBases]
+	}
+
 	return bases
 }
 
-// ExpandPaths combines filenames with paths to build full URL sets
-func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick bool) []string {
+// maxBases bounds how many base words get expanded with the full mutation set
+const maxBases = 80
+
+// ExpandPaths combines filenames with paths to build full URL sets.
+// Returns the (possibly capped) URL list plus the uncached total count so
+// callers can report when -max-probes trimmed the list.
+func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick bool, maxProbes int) ([]string, int) {
 	// merge extracted paths with common paths
 	pathSet := make(map[string]bool)
 	if quick {
@@ -334,8 +351,14 @@ func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick b
 	seen := make(map[string]bool)
 	var result []string
 
+	// approximate uncapped count for the cap warning
+	totalURLs := len(pathSet) * len(filenames)
+
 	for path := range pathSet {
 		for _, fname := range filenames {
+			if maxProbes > 0 && len(result) >= maxProbes {
+				return result, totalURLs
+			}
 			url := path + fname
 			if !seen[url] {
 				seen[url] = true
@@ -344,7 +367,7 @@ func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick b
 		}
 	}
 
-	return result
+	return result, totalURLs
 }
 
 // LoadWordlist reads words from a file
@@ -391,16 +414,16 @@ func generateDates() []string {
 	now := time.Now()
 	var dates []string
 
+	// trimmed to the five most commonly deployed date formats — the full set
+	// (with every separator variant) is far too expensive for default runs
 	for delta := 0; delta <= 365*3; delta += 30 {
 		t := now.AddDate(0, 0, -delta)
 		dates = append(dates,
-			t.Format("20060102"),        // YYYYMMDD
-			t.Format("2006-01-02"),      // YYYY-MM-DD
-			t.Format("02-01-2006"),      // DD-MM-YYYY
-			t.Format("01-2006"),         // MM-YYYY
-			t.Format("2006-01"),         // YYYY-MM
-			t.Format("200601"),          // YYYYMM
-			fmt.Sprintf("%d", t.Year()), // YYYY
+			t.Format("20060102"),   // YYYYMMDD
+			t.Format("2006-01-02"), // YYYY-MM-DD
+			t.Format("2006-01"),    // YYYY-MM
+			t.Format("200601"),     // YYYYMM
+			t.Format("02-01-2006"), // DD-MM-YYYY
 		)
 	}
 

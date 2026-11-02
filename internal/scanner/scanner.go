@@ -7,14 +7,16 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Baba01hacker666/z1pfd/internal/httpx"
 )
 
 // Printer interface to avoid import cycle with output package
@@ -33,6 +35,7 @@ type Config struct {
 	Depth       int
 	NoRedirect  bool
 	RandomUA    bool
+	SpoofIP     bool
 	MinSize     int64
 	RateLimit   int
 	Verbose     bool
@@ -40,6 +43,83 @@ type Config struct {
 	NoProgress  bool
 	// Ctx enables graceful shutdown on interrupt. nil = run to completion.
 	Ctx context.Context
+	// shared WAF-aware adaptive throttle (created by Run)
+	state *adaptiveThrottle
+}
+
+// adaptiveThrottle implements WAF-aware pacing shared by all workers:
+// when a WAF/rate-limiter trips, every worker slows down until the
+// exponential backoff deadline passes, and the failed request is retried once.
+type adaptiveThrottle struct {
+	mu      sync.Mutex
+	until   time.Time
+	backoff time.Duration
+	names   map[string]bool
+}
+
+func newAdaptiveThrottle() *adaptiveThrottle {
+	return &adaptiveThrottle{
+		backoff: 1500 * time.Millisecond, // first slow-down after a WAF hit
+		names:   make(map[string]bool),
+	}
+}
+
+func (t *adaptiveThrottle) wait() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	until := t.until
+	t.mu.Unlock()
+	if d := time.Until(until); d > 0 {
+		time.Sleep(d)
+	}
+}
+
+// trip records a WAF hit and extends the global backoff deadline
+func (t *adaptiveThrottle) trip() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.backoff *= 2
+	if t.backoff > 12*time.Second {
+		t.backoff = 12 * time.Second
+	}
+	if dl := time.Now().Add(t.backoff); dl.After(t.until) {
+		t.until = dl
+	}
+}
+
+func (t *adaptiveThrottle) detected(name string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.names[name] = true
+	t.mu.Unlock()
+}
+
+func (t *adaptiveThrottle) detectedNames() []string {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	names := make([]string, 0, len(t.names))
+	for n := range t.names {
+		names = append(names, n)
+	}
+	t.mu.Unlock()
+	sort.Strings(names)
+	return names
+}
+
+// adaptiveWait blocks until the shared backoff deadline passes (if any)
+func adaptiveWait(t *adaptiveThrottle) {
+	if t != nil {
+		t.wait()
+	}
 }
 
 // Result represents a found archive
@@ -50,19 +130,6 @@ type Result struct {
 	ContentType  string        `json:"content_type"`
 	ResponseTime time.Duration `json:"response_time_ms"`
 	MagicMatch   bool          `json:"magic_bytes_match"`
-}
-
-var userAgents = []string{
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-	"Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-	"curl/8.7.1",
-	"python-requests/2.31.0",
-	"Go-http-client/1.1",
-	"Wget/1.21.4",
-	"Java/17.0.1",
-	"axios/1.6.0",
 }
 
 // magic byte signatures for archive types (checked against the first bytes of the body)
@@ -99,6 +166,7 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cfg.state = newAdaptiveThrottle()
 
 	// normalize extensions once (lowercase, trimmed)
 	for i, ext := range cfg.Extensions {
@@ -282,6 +350,11 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 		printer.Info("Interrupted — partial progress saved, re-run with same -resume to continue")
 	}
 
+	// report WAF mitigation that kicked in during this scan
+	if names := cfg.state.detectedNames(); len(names) > 0 {
+		printer.Info("WAF detected: %s — traffic was auto-slowed and requests retried once after backoff", strings.Join(names, ", "))
+	}
+
 	// save final resume state
 	if cfg.ResumeFile != "" {
 		scannedMu.Lock()
@@ -293,14 +366,26 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 }
 
 func probe(client *http.Client, cfg *Config, fullURL string) (Result, bool) {
+	adaptiveWait(cfg.state)
 	start := time.Now()
 
 	// HEAD first: cheap existence check
-	head, headOK := doRequest(client, cfg, "HEAD", fullURL, start)
+	head, headOK, waf := doRequest(client, cfg, "HEAD", fullURL, start)
+	if waf {
+		// WAF/rate-limit tripped: slow down globally, retry this request once
+		cfg.state.trip()
+		adaptiveWait(cfg.state)
+		head, headOK, _ = doRequest(client, cfg, "HEAD", fullURL, start)
+	}
+
 	if headOK {
-		// confirm with GET so magic bytes can be checked
-		// (soft-404 pages often return 200 for HEAD probes)
-		got, gotOK := doRequest(client, cfg, "GET", fullURL, start)
+		adaptiveWait(cfg.state)
+		got, gotOK, waf := doRequest(client, cfg, "GET", fullURL, start)
+		if waf {
+			cfg.state.trip()
+			adaptiveWait(cfg.state)
+			got, gotOK, _ = doRequest(client, cfg, "GET", fullURL, start)
+		}
 		if gotOK {
 			return got, true
 		}
@@ -313,38 +398,34 @@ func probe(client *http.Client, cfg *Config, fullURL string) (Result, bool) {
 
 	// fallback to GET when HEAD is unsupported or failed entirely
 	if head.Status == 0 || head.Status == 405 {
-		return doRequest(client, cfg, "GET", fullURL, start)
+		adaptiveWait(cfg.state)
+		got, gotOK, waf := doRequest(client, cfg, "GET", fullURL, start)
+		if waf {
+			cfg.state.trip()
+			adaptiveWait(cfg.state)
+			got, gotOK, _ = doRequest(client, cfg, "GET", fullURL, start)
+		}
+		return got, gotOK
 	}
 
 	return head, false
 }
 
-func doRequest(client *http.Client, cfg *Config, method, fullURL string, start time.Time) (Result, bool) {
+func doRequest(client *http.Client, cfg *Config, method, fullURL string, start time.Time) (Result, bool, bool) {
 	req, err := http.NewRequest(method, fullURL, nil)
 	if err != nil {
-		return Result{}, false
+		return Result{}, false, false
 	}
 
-	// headers
-	if cfg.RandomUA {
-		req.Header.Set("User-Agent", userAgents[rand.Intn(len(userAgents))])
-	} else {
-		req.Header.Set("User-Agent", "z1pfd/1.1 (+https://github.com/Baba01hacker666/z1pfd)")
-	}
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Cache-Control", "no-cache")
-
-	// WAF/CDN bypass headers
-	req.Header.Set("X-Forwarded-For", randomIP())
-	req.Header.Set("X-Real-IP", randomIP())
-	req.Header.Set("X-Originating-IP", randomIP())
+	// realistic User-Agent + browser-matched header set
+	httpx.Apply(req, cfg.RandomUA, cfg.SpoofIP)
 
 	resp, err := client.Do(req)
 	if err != nil {
 		if cfg.Verbose {
 			fmt.Fprintf(os.Stderr, "[DBG] %s %s → %v\n", method, fullURL, err)
 		}
-		return Result{}, false
+		return Result{}, false, false
 	}
 	defer func() {
 		if resp != nil && resp.Body != nil {
@@ -366,9 +447,27 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 	// size from Content-Length
 	result.Size = resp.ContentLength
 
+	// WAF / rate-limit sniffing happens only where it matters
+	wafHit := false
+	if resp.StatusCode == 429 || resp.StatusCode == 403 {
+		buf := make([]byte, 8192)
+		n, _ := io.ReadFull(resp.Body, buf)
+		if name := httpx.DetectWAF(resp.Header, string(buf[:n])); name != "" {
+			cfg.state.detected(name)
+			wafHit = true
+		}
+		if resp.StatusCode == 429 {
+			// rate limited even if no known WAF signature matched
+			wafHit = true
+		}
+	}
+	if wafHit {
+		return result, false, true
+	}
+
 	// check status
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
-		return result, false
+		return result, false, false
 	}
 
 	// check content type
@@ -383,7 +482,7 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 
 	// reject obvious soft-404 pages: text content served for an archive URL
 	if strings.Contains(ct, "text/") {
-		return result, false
+		return result, false, false
 	}
 
 	// check magic bytes (read first 8 bytes)
@@ -400,7 +499,7 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 
 	// size check
 	if cfg.MinSize > 0 && result.Size > 0 && result.Size < cfg.MinSize {
-		return result, false
+		return result, false, false
 	}
 
 	// accept if: content type matches, magic bytes match, or Content-Length > 1000 and extension matches
@@ -413,15 +512,15 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 	}
 
 	if ctMatch || result.MagicMatch || (extMatch && result.Size > 1000) {
-		return result, true
+		return result, true, false
 	}
 
 	// unknown transfer size (chunked) with matching extension: still worth reporting
 	if extMatch && result.Size == -1 && result.Status == 200 {
-		return result, true
+		return result, true, false
 	}
 
-	return result, false
+	return result, false, false
 }
 
 func checkMagic(data []byte) bool {
@@ -431,12 +530,6 @@ func checkMagic(data []byte) bool {
 		}
 	}
 	return false
-}
-
-func randomIP() string {
-	return fmt.Sprintf("%d.%d.%d.%d",
-		rand.Intn(223)+1, rand.Intn(254)+1,
-		rand.Intn(254)+1, rand.Intn(254)+1)
 }
 
 func buildClient(cfg *Config) *http.Client {

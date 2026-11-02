@@ -1,7 +1,6 @@
 package extractor
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Baba01hacker666/z1pfd/internal/httpx"
 )
 
 // Intel holds extracted intelligence from the target
@@ -92,17 +93,11 @@ func Extract(target string, timeout time.Duration, proxy string) (*Intel, error)
 		intel.Keywords = appendUnique(intel.Keywords, host)
 	}
 
-	// fetch page
-	client := buildClient(timeout, proxy)
-	resp, err := client.Get(target)
+	// fetch page (retries once if a WAF/rate-limiter gets in the way)
+	client := httpx.BuildClient(timeout, proxy)
+	body, err := fetchPage(client, target)
 	if err != nil {
 		return intel, fmt.Errorf("fetch failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024)) // 2MB limit
-	if err != nil {
-		return intel, fmt.Errorf("read body failed: %w", err)
 	}
 
 	content := string(body)
@@ -199,12 +194,53 @@ func Extract(target string, timeout time.Duration, proxy string) (*Intel, error)
 }
 
 func checkGit(client *http.Client, target string) bool {
-	resp, err := client.Head(target + "/.git/HEAD")
+	req, err := http.NewRequest("HEAD", target+"/.git/HEAD", nil)
+	if err != nil {
+		return false
+	}
+	// use a realistic UA so the probe blends in with normal browsing
+	httpx.Apply(req, true, false)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	resp.Body.Close()
 	return resp.StatusCode == 200
+}
+
+// fetchPage downloads the target page, retrying a couple of times when a
+// WAF/rate-limiter blocks the attempt (common on Cloudflare/Imunify360/
+// ModSecurity sites) — everything downstream depends on this intelligence
+func fetchPage(client *http.Client, target string) ([]byte, error) {
+	var lastErr error
+	backoffs := []time.Duration{0, 1500 * time.Millisecond, 3 * time.Second}
+	for _, wait := range backoffs {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		req, err := http.NewRequest("GET", target, nil)
+		if err != nil {
+			return nil, err
+		}
+		httpx.Apply(req, true, false)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode == 403 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024)) // 2MB limit
+		resp.Body.Close()
+		return body, err
+	}
+	return nil, lastErr
 }
 
 func extractWords(s string) []string {
@@ -278,26 +314,4 @@ func appendUnique(slice []string, items ...string) []string {
 		}
 	}
 	return slice
-}
-
-func buildClient(timeout time.Duration, proxy string) *http.Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	if proxy != "" {
-		proxyURL, err := url.Parse(proxy)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
-	}
-	return &http.Client{
-		Timeout:   timeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}
 }
