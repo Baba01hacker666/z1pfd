@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"z1pfd/internal/scanner"
+	"github.com/Baba01hacker666/z1pfd/internal/scanner"
 )
 
 // ANSI color codes

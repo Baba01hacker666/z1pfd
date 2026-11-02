@@ -2,19 +2,22 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
-	"z1pfd/internal/extractor"
-	"z1pfd/internal/generator"
-	"z1pfd/internal/output"
-	"z1pfd/internal/scanner"
+	"github.com/Baba01hacker666/z1pfd/internal/extractor"
+	"github.com/Baba01hacker666/z1pfd/internal/generator"
+	"github.com/Baba01hacker666/z1pfd/internal/output"
+	"github.com/Baba01hacker666/z1pfd/internal/scanner"
 )
 
 const banner = `
@@ -23,7 +26,7 @@ const banner = `
   / / _ | || |_) || |_  | | | |
  /_/|___||_||____/|____||_|_|_|
 
-  Dynamic ZIP Finder v1.0
+  Dynamic ZIP Finder v1.1
   by Baba01hacker666 | DCT
 `
 
@@ -34,11 +37,12 @@ type ToolConfig struct {
 	Extensions        string `yaml:"extensions"`
 	Proxy             string `yaml:"proxy"`
 	Depth             int    `yaml:"depth"`
-	NoRedirect        bool   `yaml:"no_redirect"`
-	RandomUA          bool   `yaml:"rand_ua"`
+	NoRedirect        *bool  `yaml:"no_redirect"`
+	RandomUA          *bool  `yaml:"rand_ua"`
 	MinSize           int64  `yaml:"min_size"`
 	RateLimit         int    `yaml:"rate_limit"`
 	Wordlist          string `yaml:"wordlist"`
+	Quick             *bool  `yaml:"quick"`
 }
 
 func loadConfig(path string) (*ToolConfig, error) {
@@ -80,6 +84,8 @@ func main() {
 
 	flag.Parse()
 
+	// YAML config values apply only to flags NOT explicitly set on the command
+	// line, so the CLI always wins and YAML never overrides user intent.
 	if *configFile != "" {
 		cfg, err := loadConfig(*configFile)
 		if err != nil {
@@ -87,40 +93,74 @@ func main() {
 			os.Exit(1)
 		}
 
-		if cfg.Concurrency > 0 {
-			*concurrency = cfg.Concurrency
-		}
-		if cfg.TargetConcurrency > 0 {
-			*targetConcurrency = cfg.TargetConcurrency
-		}
-		if cfg.Timeout > 0 {
-			*timeout = cfg.Timeout
-		}
-		if cfg.Extensions != "" {
-			*extensions = cfg.Extensions
-		}
-		if cfg.Proxy != "" {
-			*proxy = cfg.Proxy
-		}
-		if cfg.Depth > 0 {
-			*depth = cfg.Depth
-		}
-		if cfg.MinSize > 0 {
-			*minSize = cfg.MinSize
-		}
-		if cfg.RateLimit > 0 {
-			*rateLimit = cfg.RateLimit
-		}
-		if cfg.Wordlist != "" {
-			*wordlist = cfg.Wordlist
+		explicit := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		apply := func(name string, fn func()) {
+			if !explicit[name] {
+				fn()
+			}
 		}
 
-		if cfg.NoRedirect {
-			*noRedirect = true
-		}
-		if cfg.RandomUA {
-			*randomUA = true
-		}
+		apply("c", func() {
+			if cfg.Concurrency > 0 {
+				*concurrency = cfg.Concurrency
+			}
+		})
+		apply("tc", func() {
+			if cfg.TargetConcurrency > 0 {
+				*targetConcurrency = cfg.TargetConcurrency
+			}
+		})
+		apply("timeout", func() {
+			if cfg.Timeout > 0 {
+				*timeout = cfg.Timeout
+			}
+		})
+		apply("ext", func() {
+			if cfg.Extensions != "" {
+				*extensions = cfg.Extensions
+			}
+		})
+		apply("proxy", func() {
+			if cfg.Proxy != "" {
+				*proxy = cfg.Proxy
+			}
+		})
+		apply("depth", func() {
+			if cfg.Depth > 0 {
+				*depth = cfg.Depth
+			}
+		})
+		apply("min-size", func() {
+			if cfg.MinSize > 0 {
+				*minSize = cfg.MinSize
+			}
+		})
+		apply("rate", func() {
+			if cfg.RateLimit > 0 {
+				*rateLimit = cfg.RateLimit
+			}
+		})
+		apply("w", func() {
+			if cfg.Wordlist != "" {
+				*wordlist = cfg.Wordlist
+			}
+		})
+		apply("q", func() {
+			if cfg.Quick != nil {
+				*quick = *cfg.Quick
+			}
+		})
+		apply("no-redirect", func() {
+			if cfg.NoRedirect != nil {
+				*noRedirect = *cfg.NoRedirect
+			}
+		})
+		apply("rand-ua", func() {
+			if cfg.RandomUA != nil {
+				*randomUA = *cfg.RandomUA
+			}
+		})
 	}
 
 	if *target == "" && *listFile == "" {
@@ -129,7 +169,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	exts := strings.Split(*extensions, ",")
+	// normalize extensions: trim, lowercase, dedupe, ensure leading dot
+	seenExt := map[string]bool{}
+	var exts []string
+	for _, e := range strings.Split(*extensions, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		if !seenExt[e] {
+			seenExt[e] = true
+			exts = append(exts, e)
+		}
+	}
+	if len(exts) == 0 {
+		fmt.Fprintln(os.Stderr, "[ERR] no valid extensions after parsing -ext")
+		os.Exit(1)
+	}
+
+	// graceful shutdown: first Ctrl+C stops gracefully (saves resume state),
+	// second Ctrl+C forces exit
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+		fmt.Fprintln(os.Stderr, "\n[!] Interrupt — stopping gracefully, press Ctrl+C again to force exit")
+		<-sigCh
+		os.Exit(130)
+	}()
 
 	printer := output.New(!*noColor)
 
@@ -172,7 +245,7 @@ func main() {
 	}
 	printer.Info("Workers : %d", *concurrency)
 	printer.Info("Timeout : %ds", *timeout)
-	printer.Info("Exts    : %s", *extensions)
+	printer.Info("Exts    : %s", strings.Join(exts, ","))
 
 	var allResults []scanner.Result
 	var mu sync.Mutex
@@ -200,6 +273,7 @@ func main() {
 			Verbose:     *verbose,
 			ResumeFile:  *resume,
 			NoProgress:  multi,
+			Ctx:         ctx,
 		}
 
 		wg.Add(1)

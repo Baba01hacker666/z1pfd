@@ -1,4 +1,4 @@
-module z1pfd
+module github.com/Baba01hacker666/z1pfd
 
 go 1.21
 

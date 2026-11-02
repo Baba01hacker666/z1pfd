@@ -6,8 +6,9 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
-	"z1pfd/internal/extractor"
+	"github.com/Baba01hacker666/z1pfd/internal/extractor"
 )
 
 // Generator builds dynamic wordlists from intel
@@ -198,8 +199,8 @@ func (g *Generator) Generate(customWords []string, quick bool) []string {
 		}
 
 		// uppercase / capitalized variants (generates filenames like Backup, BACKUP)
+		addWord(titleCase(base))
 		addWord(strings.ToUpper(base))
-		addWord(strings.Title(strings.ToLower(base)))
 	}
 
 	// add all common names standalone + date combos
@@ -293,8 +294,6 @@ func ExpandPaths(filenames []string, extractedPaths []string, depth int, quick b
 	pathSet := make(map[string]bool)
 	if quick {
 		pathSet["/"] = true
-		
-		
 	} else {
 		for _, p := range commonPaths {
 			pathSet[p] = true
@@ -365,6 +364,16 @@ func LoadWordlist(path string) ([]string, error) {
 		}
 	}
 	return words, scanner.Err()
+}
+
+// titleCase capitalizes the first letter (replaces the deprecated strings.Title)
+func titleCase(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(strings.ToLower(s))
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 func generateYears() []string {

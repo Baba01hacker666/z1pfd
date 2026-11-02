@@ -1,0 +1,39 @@
+# z1pfd example configuration
+# Usage: z1pfd -u https://target.com -config config.example.yaml
+#
+# Command-line flags always win:
+# any option set explicitly on the CLI overrides the value from this file.
+
+# Concurrent workers per target
+concurrency: 50
+
+# Maximum number of targets scanned at the same time (when using -l)
+target_concurrency: 5
+
+# Request timeout in seconds
+timeout: 10
+
+# Comma-separated archive extensions to hunt for
+extensions: ".zip,.tar.gz,.rar,.7z"
+
+# HTTP proxy (e.g. Burp: http://127.0.0.1:8080)
+proxy: ""
+
+# Path depth: 1 = common root paths, 2 = also expanded sub-paths
+depth: 1
+
+# Toggle behavioral options (omit or leave commented to keep defaults)
+no_redirect: false
+rand_ua: true
+
+# Only report files larger than this many bytes (0 = no limit)
+min_size: 0
+
+# Requests-per-second limit (0 = unlimited)
+rate_limit: 0
+
+# Additional custom wordlist file (one word per line)
+# wordlist: "words.txt"
+
+# Quick mode: limit paths and mutations for fast testing
+quick: false

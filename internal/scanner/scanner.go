@@ -3,8 +3,8 @@ package scanner
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -38,6 +38,8 @@ type Config struct {
 	Verbose     bool
 	ResumeFile  string
 	NoProgress  bool
+	// Ctx enables graceful shutdown on interrupt. nil = run to completion.
+	Ctx context.Context
 }
 
 // Result represents a found archive
@@ -63,15 +65,16 @@ var userAgents = []string{
 	"axios/1.6.0",
 }
 
-// magic byte signatures for archive types
+// magic byte signatures for archive types (checked against the first bytes of the body)
 var magicBytes = map[string][]byte{
 	".zip":    {0x50, 0x4B, 0x03, 0x04}, // PK..
 	".rar":    {0x52, 0x61, 0x72, 0x21}, // Rar!
 	".7z":     {0x37, 0x7A, 0xBC, 0xAF}, // 7z
 	".tar.gz": {0x1F, 0x8B},             // gzip
 	".gz":     {0x1F, 0x8B},
-	".bz2":    {0x42, 0x5A, 0x68},       // BZh
-	".tar":    {0x75, 0x73, 0x74, 0x61}, // ustar (offset 257, simplified check)
+	".bz2":    {0x42, 0x5A, 0x68}, // BZh
+	// plain .tar files have no reliable magic in the first bytes (ustar sits at
+	// offset 257), so they are detected via Content-Type instead
 }
 
 var validContentTypes = []string{
@@ -92,6 +95,16 @@ var validContentTypes = []string{
 
 // Run executes the scanner and returns all found results
 func Run(cfg *Config, paths []string, printer Printer) []Result {
+	ctx := cfg.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// normalize extensions once (lowercase, trimmed)
+	for i, ext := range cfg.Extensions {
+		cfg.Extensions[i] = strings.ToLower(strings.TrimSpace(ext))
+	}
+
 	// load resume state
 	resumeState := loadResumeState(cfg.ResumeFile)
 	scanned := resumeState.Scanned
@@ -109,9 +122,16 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 		printer.Info("Resuming: skipping %d already-scanned URLs", len(scanned))
 	}
 
+	var results []Result
+
 	total := len(todo)
+	if total == 0 {
+		return results
+	}
+
 	var done atomic.Int64
 	var found atomic.Int64
+	interrupted := false
 
 	jobs := make(chan string, cfg.Concurrency*2)
 	resultCh := make(chan Result, 100)
@@ -127,19 +147,29 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 	client := buildClient(cfg)
 
 	// background progress updater to prevent lock contention on stdout
+	progressDone := make(chan struct{})
 	if !cfg.NoProgress {
+		// progressDone is closed only by this goroutine (via defer)
 		go func() {
+			defer close(progressDone)
 			progTicker := time.NewTicker(250 * time.Millisecond)
 			defer progTicker.Stop()
-			for range progTicker.C {
-				d := done.Load()
-				if d >= int64(total) {
+			for {
+				select {
+				case <-progTicker.C:
+					d := done.Load()
+					if d >= int64(total) {
+						return
+					}
+					pct := float64(d) / float64(total) * 100
+					printer.Progress(d, int64(total), pct, found.Load())
+				case <-ctx.Done():
 					return
 				}
-				pct := float64(d) / float64(total) * 100
-				printer.Progress(d, int64(total), pct, found.Load())
 			}
 		}()
+	} else {
+		close(progressDone)
 	}
 
 	var scannedMu sync.Mutex
@@ -149,44 +179,57 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for path := range jobs {
-				if ticker != nil {
-					<-ticker.C
-				}
-				fullURL := cfg.Target + path
-				result, ok := probe(client, cfg, fullURL)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case path, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if ticker != nil {
+						<-ticker.C
+					}
+					fullURL := cfg.Target + path
+					result, ok := probe(client, cfg, fullURL)
 
-				d := done.Add(1)
-				if !cfg.NoProgress && d == int64(total) {
-					pct := float64(d) / float64(total) * 100
-					printer.Progress(d, int64(total), pct, found.Load())
-				}
+					d := done.Add(1)
+					if !cfg.NoProgress && d == int64(total) {
+						pct := float64(d) / float64(total) * 100
+						printer.Progress(d, int64(total), pct, found.Load())
+					}
 
-				if ok {
-					found.Add(1)
-					resultCh <- result
-				}
+					if ok {
+						found.Add(1)
+						resultCh <- result
+					}
 
-				// save resume state (thread-safe)
-				if cfg.ResumeFile != "" {
-					scannedMu.Lock()
-					scanned[fullURL] = true
-					scannedMu.Unlock()
+					// save resume state (thread-safe)
+					if cfg.ResumeFile != "" {
+						scannedMu.Lock()
+						scanned[fullURL] = true
+						scannedMu.Unlock()
+					}
 				}
 			}
 		}()
 	}
 
-	// feed jobs
+	// feed jobs (stops early if ctx is canceled)
+	feeder := make(chan struct{})
 	go func() {
+		defer close(feeder)
 		for _, path := range todo {
-			jobs <- path
+			select {
+			case jobs <- path:
+			case <-ctx.Done():
+				return
+			}
 		}
 		close(jobs)
 	}()
 
 	// collect results
-	var results []Result
 	var resultWg sync.WaitGroup
 	resultWg.Add(1)
 	go func() {
@@ -196,13 +239,54 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 		}
 	}()
 
+	// auto-save resume state periodically so interrupted scans can resume
+	runSaveTick := func() {}
+	if cfg.ResumeFile != "" {
+		saveStop := make(chan struct{})
+		go func() {
+			saver := time.NewTicker(10 * time.Second)
+			defer saver.Stop()
+			for {
+				select {
+				case <-saver.C:
+					scannedMu.Lock()
+					saveResumeState(cfg.ResumeFile, &resumeData{Scanned: scanned})
+					scannedMu.Unlock()
+				case <-saveStop:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		runSaveTick = func() { close(saveStop) }
+	}
+
 	wg.Wait()
-	close(resultCh)
+
+	// decide interruption before stopping helpers
+	select {
+	case <-ctx.Done():
+		interrupted = true
+	default:
+	}
+
+	<-feeder        // wait for feeder to stop (it closes jobs on normal completion)
+	runSaveTick()   // stop periodic saver
+	close(resultCh) // safe: no more producers after wg.Wait()
 	resultWg.Wait()
+	<-progressDone // wait for progress goroutine; it is the only closer
+
+	if interrupted {
+		fmt.Println()
+		printer.Info("Interrupted — partial progress saved, re-run with same -resume to continue")
+	}
 
 	// save final resume state
 	if cfg.ResumeFile != "" {
+		scannedMu.Lock()
 		saveResumeState(cfg.ResumeFile, &resumeData{Scanned: scanned})
+		scannedMu.Unlock()
 	}
 
 	return results
@@ -211,19 +295,28 @@ func Run(cfg *Config, paths []string, printer Printer) []Result {
 func probe(client *http.Client, cfg *Config, fullURL string) (Result, bool) {
 	start := time.Now()
 
-	// try HEAD first
-	result, ok := doRequest(client, cfg, "HEAD", fullURL, start)
-	if ok {
-		return result, true
+	// HEAD first: cheap existence check
+	head, headOK := doRequest(client, cfg, "HEAD", fullURL, start)
+	if headOK {
+		// confirm with GET so magic bytes can be checked
+		// (soft-404 pages often return 200 for HEAD probes)
+		got, gotOK := doRequest(client, cfg, "GET", fullURL, start)
+		if gotOK {
+			return got, true
+		}
+		if got.Status != 0 {
+			return got, false // GET disproved it (404, HTML body, tiny size)
+		}
+		// GET itself failed (network hiccup) — fall back to the HEAD result
+		return head, true
 	}
 
-	// fallback to GET with limited body read for magic bytes
-	if result.Status == 0 || result.Status == 405 {
-		result, ok = doRequest(client, cfg, "GET", fullURL, start)
-		return result, ok
+	// fallback to GET when HEAD is unsupported or failed entirely
+	if head.Status == 0 || head.Status == 405 {
+		return doRequest(client, cfg, "GET", fullURL, start)
 	}
 
-	return result, false
+	return head, false
 }
 
 func doRequest(client *http.Client, cfg *Config, method, fullURL string, start time.Time) (Result, bool) {
@@ -236,10 +329,9 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 	if cfg.RandomUA {
 		req.Header.Set("User-Agent", userAgents[rand.Intn(len(userAgents))])
 	} else {
-		req.Header.Set("User-Agent", "z1pfd/1.0 (+https://github.com/doraemoncyberteam)")
+		req.Header.Set("User-Agent", "z1pfd/1.1 (+https://github.com/Baba01hacker666/z1pfd)")
 	}
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Cache-Control", "no-cache")
 
 	// WAF/CDN bypass headers
@@ -289,13 +381,18 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 		}
 	}
 
+	// reject obvious soft-404 pages: text content served for an archive URL
+	if strings.Contains(ct, "text/") {
+		return result, false
+	}
+
 	// check magic bytes (read first 8 bytes)
 	var magic []byte
 	if method == "GET" {
 		buf := make([]byte, 8)
 		n, _ := io.ReadFull(resp.Body, buf)
 		magic = buf[:n]
-		result.MagicMatch = checkMagic(magic, fullURL)
+		result.MagicMatch = checkMagic(magic)
 	}
 
 	// determine extension from URL
@@ -319,21 +416,18 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 		return result, true
 	}
 
-	// if content-length is large and extension matches, likely a hit
-	if extMatch && (result.Size == -1 || result.Size > 0) && result.Status == 200 {
+	// unknown transfer size (chunked) with matching extension: still worth reporting
+	if extMatch && result.Size == -1 && result.Status == 200 {
 		return result, true
 	}
 
 	return result, false
 }
 
-func checkMagic(data []byte, urlStr string) bool {
-	lurl := strings.ToLower(urlStr)
-	for ext, sig := range magicBytes {
-		if strings.Contains(lurl, ext) || ext == ".zip" { // always check zip
-			if len(data) >= len(sig) && bytes.Equal(data[:len(sig)], sig) {
-				return true
-			}
+func checkMagic(data []byte) bool {
+	for _, sig := range magicBytes {
+		if len(data) >= len(sig) && bytes.Equal(data[:len(sig)], sig) {
+			return true
 		}
 	}
 	return false
@@ -387,8 +481,9 @@ func buildClient(cfg *Config) *http.Client {
 
 // resume state management
 
+// resumeData holds already-scanned URLs for -resume support
 type resumeData struct {
-	Scanned map[string]bool `json:"scanned"`
+	Scanned map[string]bool
 }
 
 func loadResumeState(path string) *resumeData {
@@ -417,10 +512,6 @@ func saveResumeState(path string, rd *resumeData) {
 		return
 	}
 	defer f.Close()
-
-	// save as JSON for results + newline-delimited for scanned
-	data, _ := json.MarshalIndent(rd, "", "  ")
-	_ = data
 
 	w := bufio.NewWriter(f)
 	for u := range rd.Scanned {
