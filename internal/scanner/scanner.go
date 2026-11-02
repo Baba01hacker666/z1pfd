@@ -132,7 +132,9 @@ type Result struct {
 	MagicMatch   bool          `json:"magic_bytes_match"`
 }
 
-// magic byte signatures for archive types (checked against the first bytes of the body)
+// magic byte signatures for archive types (checked against the first bytes
+// of the response body). Plain .tar has no leading magic — its "ustar"
+// signature sits at offset 257 and is verified separately in checkMagic.
 var magicBytes = map[string][]byte{
 	".zip":    {0x50, 0x4B, 0x03, 0x04}, // PK..
 	".rar":    {0x52, 0x61, 0x72, 0x21}, // Rar!
@@ -140,8 +142,6 @@ var magicBytes = map[string][]byte{
 	".tar.gz": {0x1F, 0x8B},             // gzip
 	".gz":     {0x1F, 0x8B},
 	".bz2":    {0x42, 0x5A, 0x68}, // BZh
-	// plain .tar files have no reliable magic in the first bytes (ustar sits at
-	// offset 257), so they are detected via Content-Type instead
 }
 
 var validContentTypes = []string{
@@ -485,13 +485,14 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 		return result, false, false
 	}
 
-	// check magic bytes (read first 8 bytes)
-	var magic []byte
+	// check magic bytes: with a GET we can read real body bytes, which are far
+	// more trustworthy than Content-Type labels (bare servers like python
+	// http.server label whatever they serve with the extension-based MIME
+	// type, and mislabeled/wrong files are common in the wild)
 	if method == "GET" {
-		buf := make([]byte, 8)
+		buf := make([]byte, 262) // enough to check "ustar" at offset 257
 		n, _ := io.ReadFull(resp.Body, buf)
-		magic = buf[:n]
-		result.MagicMatch = checkMagic(magic)
+		result.MagicMatch = checkMagic(buf[:n])
 	}
 
 	// determine extension from URL
@@ -511,12 +512,17 @@ func doRequest(client *http.Client, cfg *Config, method, fullURL string, start t
 		}
 	}
 
-	if ctMatch || result.MagicMatch || (extMatch && result.Size > 1000) {
-		return result, true, false
+	if method == "GET" {
+		// we have body bytes: archive magic is authoritative. A body that
+		// doesn't start with a known archive signature is a soft-404 page or
+		// a renamed text file, even if the server claimed a zip content type.
+		return result, result.MagicMatch, false
 	}
 
-	// unknown transfer size (chunked) with matching extension: still worth reporting
-	if extMatch && result.Size == -1 && result.Status == 200 {
+	// HEAD has no body to inspect: use the lenient existence heuristics.
+	// probe() follows every HEAD hit with a GET that re-verifies via magic.
+	if ctMatch || (extMatch && result.Size > 1000) ||
+		(extMatch && result.Size == -1 && result.Status == 200) {
 		return result, true, false
 	}
 
@@ -528,6 +534,10 @@ func checkMagic(data []byte) bool {
 		if len(data) >= len(sig) && bytes.Equal(data[:len(sig)], sig) {
 			return true
 		}
+	}
+	// plain .tar has no leading magic — "ustar" sits at offset 257
+	if len(data) >= 262 && string(data[257:262]) == "ustar" {
+		return true
 	}
 	return false
 }

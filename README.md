@@ -204,7 +204,7 @@ Target URL
 
 1. HTTP 200 / 206 status
 2. Content-Type matches archive MIME types (text content is rejected — blocks soft-404 pages)
-3. Magic bytes: `PK\x03\x04` (ZIP), `Rar!`, `7z`, `\x1F\x8B` (gzip), `BZh` (bzip2)
+3. **Magic bytes are authoritative on GET**: the response body must really start with `PK\x03\x04` (ZIP), `Rar!` (RAR), `7z` (7-Zip), `\x1F\x8B` (gzip), `BZh` (bzip2) — plain `.tar` is verified by the `ustar` signature at offset 257. A server that claims `application/zip` for a non-archive body (bare servers like `python -m http.server` label by extension alone) does **not** count as a hit
 4. Content-Length checks
 5. Extension match; HEAD "hits" are re-confirmed with a GET before reporting
 6. WAF/429 responses trigger slow-down + one retry instead of scanning into a wall

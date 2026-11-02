@@ -125,11 +125,10 @@ func (g *Generator) Generate(customWords []string, quick bool) []string {
 		}
 	}
 
-	// collect base words
-	bases := collectBases(g.intel)
-	for _, w := range customWords {
-		bases = append(bases, strings.TrimSpace(w))
-	}
+	// collect base words: custom wordlist entries go FIRST — they are explicit
+	// user intent and must not be pushed out by the probe cap
+	bases := append([]string{}, customWords...)
+	bases = append(bases, collectBases(g.intel)...)
 
 	years := generateYears()
 	dates := generateDates()

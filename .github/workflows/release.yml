@@ -22,21 +22,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          while IFS= read -r entry; do
-            GOOS="${entry%%/*}"
-            tmp="${entry#*/}"
-            GOARCH="${tmp%%:*}"
-            OUT="dist/${tmp#*:}"
+          for t in "linux:amd64:z1pfd-linux-amd64" "linux:arm64:z1pfd-linux-arm64" "windows:amd64:z1pfd-windows-amd64.exe" "darwin:amd64:z1pfd-macos-amd64" "darwin:arm64:z1pfd-macos-arm64"; do
+            GOOS="${t%%:*}"
+            rest="${t#*:}"
+            GOARCH="${rest%%:*}"
+            OUT="dist/${rest#*:}"
             echo "→ building $OUT (GOOS=$GOOS GOARCH=$GOARCH)"
             GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build \
               -ldflags "-s -w -X main.version=${VERSION}" -o "$OUT" .
-          done <<'EOF'
-linux/amd64:z1pfd-linux-amd64
-linux/arm64:z1pfd-linux-arm64
-windows/amd64:z1pfd-windows-amd64.exe
-darwin/amd64:z1pfd-macos-amd64
-darwin/arm64:z1pfd-macos-arm64
-EOF
+          done
 
       - name: Package (.zip + checksums)
         run: |
